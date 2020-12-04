@@ -53,24 +53,31 @@ def kJ_to_MWh(arg):  # pylint: disable=C0103
 
 
 def carnot_efficiency(temp_in, temp_out):
+    if not isinstance(temp_out, (int, float)):
+        temp_in = np.full(len(temp_out), temp_in)
+
     return temp_out / np.maximum(temp_out - temp_in, 1e-3)
 
 
 def calc_cop(temp_source, temp_target):
+    '''
+    Temperature inputs in Kelvin
+    '''
     cop_norm = 4.7
+
     temp_source_norm = celsius_to_kelvin(0)
     temp_target_norm = celsius_to_kelvin(35)
 
     cpf = 1 / carnot_efficiency(temp_source_norm,
-                                temp_target_norm) \
-          * cop_norm
+                                temp_target_norm) * cop_norm
 
     try:
         max_cop = cop_norm
-        clipped_cop = min(carnot_efficiency(temp_source,
-                                            temp_target)
-                          * cpf,
-                          max_cop)
+        if not isinstance(temp_target, (int, float)):
+            max_cop = np.full(len(temp_target), cop_norm)
+        clipped_cop = np.minimum(
+            carnot_efficiency(temp_source, temp_target) * cpf,
+            max_cop)
     except ValueError:
         max_cop = np.full(len(temp_source), cop_norm)
 
@@ -79,3 +86,10 @@ def calc_cop(temp_source, temp_target):
                                  * cpf, max_cop)
 
     return clipped_cop
+
+
+if __name__ == "__main__":
+    temp_target = np.asanyarray([celsius_to_kelvin(50), celsius_to_kelvin(70)])
+    res = calc_cop(celsius_to_kelvin(10), temp_target)
+    print(res)
+    print(calc_cop(273, 310))
