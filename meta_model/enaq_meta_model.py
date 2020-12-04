@@ -1,4 +1,19 @@
 # -*- coding: utf-8 -*-
+
+'''
+2020.11.20 Changes to variable temperature included.
+
+Considered scenarios with CONSTANT and VARIABLE temperature
+
+Included new column df["temperature_in (K)"] to evaluate the temperature
+and the performance of temperature-dependant technologies
+
+Technologies considered are:
+Solar Thermal
+Heat Pumps
+***
+
+'''
 import numpy as np
 import pandas as pd
 
@@ -7,13 +22,15 @@ from oemof.solph import (Bus, EnergySystem, Flow, Sink, Source, Transformer,
                          GenericStorage)
 from oemof.thermal import stratified_thermal_storage as sts
 
-from .physics import (celsius_to_kelvin, kelvin_to_celsius, HHV_WP,
+from .physics import (kelvin_to_celsius, HHV_WP,
                       TC_CONCRETE, H2O_HEAT_FUSION, H2O_DENSITY,
                       HS_PER_HI_GAS, kJ_to_MWh, H2O_HEAT_CAPACITY,
                       TC_INSULATION, kilo_to_mega, calc_cop)
+from meta_model.physics import celsius_to_kelvin
 
 
 class ENaQMetaModel:
+
     def __init__(self, **kwargs):
         """
         :param kwargs: parameters for the energy system, see example.py
@@ -108,6 +125,10 @@ class ENaQMetaModel:
         temperature_levels = list(set(temperature_levels))
         temperature_levels.sort()
 
+        # Drop the 30 C bus if the temps are variable and it is 40 C
+        if celsius_to_kelvin(40) in [temps['variable_temperature']]:
+            temperature_levels.remove(celsius_to_kelvin(30))
+
         # Time range of the data (in a)
         index = demand['electricity'].index
         index.freq = pd.infer_freq(index)
@@ -164,9 +185,9 @@ class ENaQMetaModel:
 
         ###################################################################
         # Solar Thermal
-        b_st = Bus(label="b_st", )
+        b_st = Bus(label="b_st",)
         s_st = Source(label="s_st",
-                      outputs={b_st: Flow(nominal_value=1)})
+                            outputs={b_st: Flow(nominal_value=1)})
 
         energy_system.add(s_st, b_st)
 
@@ -265,6 +286,11 @@ class ENaQMetaModel:
 
             energy_system.add(b_th_level, b_th_in_level)
 
+            if temp in [temps["variable_temperature"]]:
+                temp_oper = temps['temperature_in (K)']
+            else:
+                temp_oper = temp
+
             if tgs and bhp:
                 # thermal ground storage as source for heat pumps
                 thp_label = 't_thp_' + temp_str
@@ -278,7 +304,8 @@ class ENaQMetaModel:
                                            outputs={b_thp: Flow()})
                     energy_system.add(s_tgs, b_thp)
 
-                thp_cop = calc_cop(tgs['temperature'], temp)
+                thp_cop = calc_cop(tgs['temperature'], temp_oper)  # check if duck typing works
+
                 t_thp = Transformer(label=thp_label,
                                     inputs={b_el_bhp: Flow(),
                                             b_thp: Flow()},
@@ -293,7 +320,7 @@ class ENaQMetaModel:
             # ice storage as source for heat pumps
             if bhp and ihs:
                 ihp_label = 't_ihp_' + temp_str
-                ihp_cop = calc_cop(celsius_to_kelvin(0), temp)
+                ihp_cop = calc_cop(celsius_to_kelvin(0), temp_oper)
                 t_ihp = Transformer(label=ihp_label,
                                     inputs={b_el_bhp: Flow(),
                                             b_ihs: Flow()},
@@ -306,7 +333,7 @@ class ENaQMetaModel:
             # (deep) geothermal source heat pump
             if bhp and ghp:
                 ghp_label = 't_ghp_' + temp_str
-                ghp_cop = calc_cop(ghp['temperature'], temp)
+                ghp_cop = calc_cop(ghp['temperature'], temp_oper)
                 t_ghp = Transformer(label=ghp_label,
                                     inputs={b_el_bhp: Flow(),
                                             b_ghp: Flow()},
@@ -319,7 +346,7 @@ class ENaQMetaModel:
             # (near surface) geothermal source heat pump
             if bhp and shp:
                 bhp_label = 't_shp_' + temp_str
-                shp_cop = calc_cop(meteo['temp_soil'], temp)
+                shp_cop = calc_cop(meteo['temp_soil'], temp_oper)
                 t_shp = Transformer(label=bhp_label,
                                     inputs={b_el_bhp: Flow(),
                                             b_shp: Flow()},
@@ -349,15 +376,15 @@ class ENaQMetaModel:
                 storage_label = 's_heat_' + temp_str
 
                 hs_capacity = hs['volume'] * \
-                              kJ_to_MWh((temp - temps['reference']) *
-                                        H2O_DENSITY *
+                              kJ_to_MWh((temp - temps['reference']) *  # # no changes with temperature
+                                        H2O_DENSITY * 
                                         H2O_HEAT_CAPACITY)
 
                 hs_loss_rate, hs_fixed_losses_relative, hs_fixed_losses_absolute = \
                     sts.calculate_losses(
                         u_value=TC_INSULATION / hs['insulation_thickness'],
                         diameter=hs['diameter'],
-                        temp_h=temp,
+                        temp_h=temp_oper,
                         temp_c=temps['reference'],
                         temp_env=meteo['temp_air'])
 
@@ -381,8 +408,13 @@ class ENaQMetaModel:
                 temp_low_str = "{0:.0f}".format(kelvin_to_celsius(temp_low))
                 temp_high_str = "{0:.0f}".format(kelvin_to_celsius(temp))
                 heater_label = 'rise_' + temp_low_str + '_' + temp_high_str
-                heater_ratio = (temp_low - temps['reference']) / \
-                               (temp - temps['reference'])
+                # temp_low can also be variable if it is 40
+                temp_low_oper = temp_low
+                if temp_low in [temps["variable_temperature"]]:
+                    temp_low_oper = temps['temperature_in (K)']
+                
+                heater_ratio = (temp_low_oper - temps['reference']) / \
+                               (temp_oper - temps['reference'])
                 heater = Transformer(label=heater_label,
                                      inputs={b_th_in_level: Flow(),
                                              b_th[temp_low]: Flow()},
@@ -402,7 +434,7 @@ class ENaQMetaModel:
         # RLM customer for district and larger buildings
         m_el_in = Source(label='m_el_in',
                          outputs={b_elgrid: Flow(
-                             variable_costs=energy_cost['electricity']['AP'] +
+                             variable_costs=energy_cost['electricity']['AP'] + 
                                             self.spec_co2['el_in'] * self.spec_co2['price'],
                              investment=Investment(
                                  ep_costs=energy_cost['electricity']['LP']
@@ -414,9 +446,8 @@ class ENaQMetaModel:
                                                               * self.spec_co2['price'])})
         self.electricity_export_flows.append((b_elgrid.label, m_el_out.label))
 
-
         gas_price = energy_cost['fossil_gas'] \
-                    + self.spec_co2['fossil_gas'] * self.spec_co2['price']
+                    +self.spec_co2['fossil_gas'] * self.spec_co2['price']
         m_gas = Source(label='m_gas',
                        outputs={b_gas: Flow(variable_costs=gas_price)})
 
@@ -452,18 +483,23 @@ class ENaQMetaModel:
                           nominal_value=1,
                           fix=demand['heating'])})
         self.th_demand_flows.append((b_th_buildings.label, d_heat.label))
-
+        
         # create expensive source for missing heat to ensure model is solvable
         missing_heat = Source(label='missing_heat',
                               outputs={b_th_buildings: Flow(variable_costs=1000)})
         energy_system.add(missing_heat)
-
+        
         if boost_dhw:
             b_th_dhw = Bus(label="b_th_dhw")
             temp_max = max(temperature_levels)
+            
+            if temp_max in [celsius_to_kelvin(40), celsius_to_kelvin(80)]:
+                if temp_max in [temps["variable_temperature"]]:
+                    temp_max = temps['temperature_in (K)']
+            
             heater_ratio = (temp_max - temps['heat_drop_exchanger_dhw']
-                            - temps['reference']) / (temps['dhw']
-                                                     - temps['reference'])
+                            -temps['reference']) / (temps['dhw']
+                                                     -temps['reference'])
 
             heater = Transformer(label="dhw_booster",
                                  inputs={b_eldist: Flow(),
@@ -522,6 +558,7 @@ class ENaQMetaModel:
                                    * self.spec_co2['price']
                                    * HHV_WP)})
 
+
             t_pellet = Transformer(label='t_pellet',
                                    inputs={b_pellet: Flow()},
                                    outputs={
@@ -542,13 +579,13 @@ class ENaQMetaModel:
             b_gas_chp = Bus(label="b_gas_chp")
 
             biomethane_price = energy_cost['biomethane'] \
-                               + self.spec_co2['biomethane'] * self.spec_co2['price']
+                               +self.spec_co2['biomethane'] * self.spec_co2['price']
             m_gas_chp = Source(label='m_gas_chp',
                                outputs={b_gas_chp: Flow(
                                    variable_costs=
                                    (1 - chp['biomethane_fraction'])
                                    * gas_price
-                                   + chp['biomethane_fraction']
+                                   +chp['biomethane_fraction']
                                    * biomethane_price)})
             self.chp_gas_flows.append((m_gas_chp.label, b_gas_chp.label))
 
@@ -932,9 +969,9 @@ class ENaQMetaModel:
         CO2_import_el = (self.el_import() * self.spec_co2['el_in']).sum()
         CO2_export_el = (-self.el_export() * self.spec_co2['el_out']).sum()
         res = (CO2_import_natural_gas + CO2_import_biomethane
-               + CO2_import_el + CO2_import_pellet
-               - CO2_export_el)
-        return np.round(res, 1)
+               +CO2_import_el + CO2_import_pellet
+               -CO2_export_el)
+        return np.round(res, 3)
 
     def own_consumption(self):
         """
